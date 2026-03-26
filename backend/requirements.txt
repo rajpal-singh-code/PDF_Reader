@@ -5,7 +5,7 @@ langchain==0.2.1
 langchain-community==0.2.1
 langchain-huggingface==0.0.3
 
-faiss-cpu==1.7.4
+faiss-cpu==1.13.2
 
 sentence-transformers==2.7.0
 transformers==4.41.1
