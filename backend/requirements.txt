@@ -7,3 +7,4 @@ faiss-cpu
 python-dotenv
 pypdf
 groq
+python-multipart
