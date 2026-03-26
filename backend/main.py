@@ -1,7 +1,8 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
+import uuid
 from dotenv import load_dotenv
 
 # Import from rag.py
@@ -9,11 +10,17 @@ from rag import load_and_split_pdf, create_vector_store, ask_question
 
 load_dotenv()
 
+# ✅ Get BASE URL from .env
+BASE_URL = os.getenv("BASE_URL")
+
 app = FastAPI(title="PDF RAG Backend")
 
-# ✅ ADD THIS HERE
+# ✅ Ensure uploads folder exists BEFORE mounting
+os.makedirs("uploads", exist_ok=True)
+
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
+# ✅ CORS (update later with your frontend URL)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,12 +37,13 @@ VECTOR_DB = None
 
 
 @app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(request: Request, file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed.")
 
-    os.makedirs("uploads", exist_ok=True)
-    file_path = f"uploads/{file.filename}"
+    # ✅ Unique filename using UUID
+    unique_filename = f"{uuid.uuid4()}_{file.filename}"
+    file_path = f"uploads/{unique_filename}"
 
     with open(file_path, "wb") as f:
         f.write(await file.read())
@@ -46,15 +54,22 @@ async def upload_pdf(file: UploadFile = File(...)):
         global VECTOR_DB
         VECTOR_DB = create_vector_store(chunks)
 
+        # ✅ Dynamic URL handling
+        if BASE_URL:
+            file_url = f"{BASE_URL}/{file_path}"
+        else:
+            file_url = str(request.base_url) + file_path
+
         return {
             "message": "PDF uploaded and processed successfully!",
-            "filename": file.filename,
-            "url": f"http://127.0.0.1:8000/{file_path}",  
+            "filename": unique_filename,
+            "url": file_url,
             "chunks": len(chunks)
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/chat")
 def chat(query: str):
@@ -73,7 +88,7 @@ def chat(query: str):
         for doc in docs:
             sources.append({
                 "text": doc.page_content[:200] + "...",
-                "page": doc.metadata.get("page", "N/A")  
+                "page": doc.metadata.get("page", "N/A")
             })
 
         return {
