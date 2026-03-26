@@ -1,280 +1,533 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import axios from "axios";
 import { Document, Page, pdfjs } from "react-pdf";
-import { Trash2, FileText, Upload, Send, ChevronLeft, ChevronRight } from "lucide-react";
+import {
+  Send, ChevronLeft, ChevronRight,
+  FileText, Upload, MessageSquare, X, Loader2,
+  ZoomIn, ZoomOut, RotateCw, BookOpen, Sparkles,
+} from "lucide-react";
 
-// PDF Worker Setup
-pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
+// ✅ FIX: Use unpkg which always has every exact version, avoiding CDN mismatches
+// unpkg serves the exact installed package version so the worker always matches
+// Worker: see options below — choose ONE based on your setup
+pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
 
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "";
+
+// ─── Toast ────────────────────────────────────────────────────────
+function Toast({ toasts }) {
+  return (
+    <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+      {toasts.map((t) => (
+        <div
+          key={t.id}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium shadow-2xl
+            ${t.type === "error"   ? "bg-red-950 border border-red-500/60 text-red-300" :
+              t.type === "success" ? "bg-emerald-950 border border-emerald-500/60 text-emerald-300" :
+                                     "bg-slate-800 border border-slate-600/60 text-slate-200"}`}
+          style={{ animation: "slideIn .25s ease" }}
+        >
+          <span className="font-bold text-base leading-none">
+            {t.type === "error" ? "✕" : t.type === "success" ? "✓" : "ℹ"}
+          </span>
+          {t.message}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Source normalizer ────────────────────────────────────────────
+// Backend may return sources as numbers, strings, or {text, page} objects.
+// Rendering an object directly as a React child causes the "Objects are not
+// valid as a React child" crash — always convert to a string first.
+function toSourceLabel(s) {
+  if (s === null || s === undefined) return null;
+  if (typeof s === "number") return String(s);
+  if (typeof s === "string") return s;
+  if (typeof s === "object") {
+    if (s.page !== undefined) return String(s.page);
+    if (s.text !== undefined) return String(s.text).slice(0, 40);
+  }
+  return null;
+}
+
+// ─── Chat Bubble ──────────────────────────────────────────────────
+function ChatBubble({ msg }) {
+  const isUser = msg.role === "user";
+
+  // Normalize every source entry to a safe string — prevents React crash
+  const safeSources = (msg.sources || [])
+    .map(toSourceLabel)
+    .filter(Boolean)
+    .filter((v, i, a) => a.indexOf(v) === i); // deduplicate
+
+  return (
+    <div className={`flex items-end gap-2 w-full ${isUser ? "flex-row-reverse" : ""}`}>
+      {!isUser && (
+        <div className="w-7 h-7 rounded-full bg-gradient-to-br from-violet-600 to-indigo-500 flex items-center justify-center flex-shrink-0 shadow-md self-start mt-0.5">
+          <Sparkles size={11} className="text-white" />
+        </div>
+      )}
+      {/* min-w-0 stops flex child from overflowing its container on long text */}
+      <div
+        className={`min-w-0 max-w-[85%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed
+          ${isUser
+            ? "bg-gradient-to-br from-violet-600 to-indigo-600 text-white rounded-br-sm shadow-lg"
+            : "bg-slate-800 border border-slate-700/60 text-slate-200 rounded-bl-sm"}`}
+      >
+        {/* whitespace-pre-wrap preserves newlines in AI responses;
+            overflowWrap:anywhere breaks any word/URL that would overflow */}
+        <p className="whitespace-pre-wrap break-words" style={{ overflowWrap: "anywhere" }}>
+          {msg.text}
+        </p>
+        {safeSources.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5 items-center">
+            <span className="text-xs text-slate-400 flex-shrink-0">Sources:</span>
+            {safeSources.map((label, i) => (
+              <span key={i} className="text-xs bg-violet-900/50 text-violet-300 px-2 py-0.5 rounded-full border border-violet-700/40 flex-shrink-0">
+                p.{label}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Chip({ label, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      className="w-full text-left px-3.5 py-2 rounded-xl text-xs text-violet-300 bg-violet-950/60 border border-violet-800/50 hover:bg-violet-900/60 hover:border-violet-600 transition-all duration-150 font-medium"
+    >
+      {label}
+    </button>
+  );
+}
+
+function ToolBtn({ onClick, disabled, children }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="flex items-center justify-center p-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 hover:border-violet-500 hover:text-violet-400 disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-150"
+    >
+      {children}
+    </button>
+  );
+}
+
+// ─── Main App ─────────────────────────────────────────────────────
 export default function App() {
-  const [files, setFiles] = useState([]);
+  const [files, setFiles]           = useState([]);
   const [activeFile, setActiveFile] = useState(null);
-  const [numPages, setNumPages] = useState(null);
+  const [numPages, setNumPages]     = useState(null);
   const [pageNumber, setPageNumber] = useState(1);
-  const [query, setQuery] = useState("");
-  const [messages, setMessages] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [scale, setScale]           = useState(1.0);
+  const [query, setQuery]           = useState("");
+  const [messages, setMessages]     = useState([]);
+  const [loading, setLoading]       = useState(false);
+  const [uploading, setUploading]   = useState(false);
   const [typingText, setTypingText] = useState("");
+  const [toasts, setToasts]         = useState([]);
+  const [dragOver, setDragOver]     = useState(false);
+  const [chatOpen, setChatOpen]     = useState(false);
+  const [pdfError, setPdfError]     = useState(false);
 
-  const BACKEND_URL = "http://127.0.0.1:8000";
-  const chatEndRef = useRef(null);
+  const chatEndRef   = useRef(null);
+  const fileInputRef = useRef(null);
+  const typingRef    = useRef(null);
 
-  // Load saved files from LocalStorage
-  useEffect(() => {
-    const saved = JSON.parse(localStorage.getItem("pdfFiles"));
-    if (saved?.length > 0) {
-      setFiles(saved);
-      setActiveFile(saved[0]);
-    }
+  const showToast = useCallback((message, type = "info") => {
+    const id = Date.now();
+    setToasts((p) => [...p, { id, message, type }]);
+    setTimeout(() => setToasts((p) => p.filter((t) => t.id !== id)), 3500);
   }, []);
 
-  // Save files to LocalStorage
   useEffect(() => {
-    localStorage.setItem("pdfFiles", JSON.stringify(files));
+    try {
+      const saved = JSON.parse(localStorage.getItem("pdfFiles") || "[]");
+      const valid = saved.filter((f) => f.url && !f.url.startsWith("blob:"));
+      if (valid.length) { setFiles(valid); setActiveFile(valid[0]); }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    const saveable = files.filter((f) => !f.url?.startsWith("blob:"));
+    localStorage.setItem("pdfFiles", JSON.stringify(saveable));
   }, [files]);
 
-  // Auto-scroll to bottom of chat
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, typingText]);
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); },
+    [messages, typingText]);
 
-  const handleUpload = async (file) => {
+  const handleUpload = useCallback(async (file) => {
     if (!file) return;
-    const formData = new FormData();
-    formData.append("file", file);
+    if (file.type !== "application/pdf") return showToast("Only PDF files are allowed", "error");
+    if (file.size > 20 * 1024 * 1024)   return showToast("File must be under 20 MB", "error");
 
-    try {
-      setLoading(true);
-      const res = await axios.post(`${BACKEND_URL}/upload`, formData);
-      const newFile = { 
-        name: res.data.filename || file.name, 
-        url: res.data.url || URL.createObjectURL(file) 
-      };
-      setFiles((prev) => [...prev, newFile]);
+    const blobUrl = URL.createObjectURL(file);
+
+    if (BACKEND_URL) {
+      const formData = new FormData();
+      formData.append("file", file);
+      try {
+        setUploading(true);
+        showToast("Uploading…", "info");
+        const res = await axios.post(`${BACKEND_URL}/upload`, formData);
+        if (!res.data?.url) throw new Error("Invalid response");
+        URL.revokeObjectURL(blobUrl);
+        const newFile = { name: res.data.filename || file.name, url: res.data.url };
+        setFiles((p) => [...p, newFile]);
+        setActiveFile(newFile);
+        setPageNumber(1); setPdfError(false);
+        showToast("PDF uploaded ✓", "success");
+      } catch {
+        const newFile = { name: file.name, url: blobUrl, isBlob: true };
+        setFiles((p) => [...p, newFile]);
+        setActiveFile(newFile);
+        setPageNumber(1); setPdfError(false);
+        showToast("Local preview (no backend)", "info");
+      } finally { setUploading(false); }
+    } else {
+      const newFile = { name: file.name, url: blobUrl, isBlob: true };
+      setFiles((p) => [...p, newFile]);
       setActiveFile(newFile);
-      setPageNumber(1);
-    } catch (err) {
-      alert("Upload failed. Please check your backend connection.");
-    } finally {
-      setLoading(false);
+      setPageNumber(1); setPdfError(false);
+      showToast("PDF loaded ✓", "success");
     }
-  };
+  }, [showToast]);
+
+  const onDrop = useCallback((e) => {
+    e.preventDefault(); setDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (file) handleUpload(file);
+  }, [handleUpload]);
 
   const removeFile = (index) => {
+    const f = files[index];
+    if (f?.isBlob && f.url) URL.revokeObjectURL(f.url);
     const updated = files.filter((_, i) => i !== index);
     setFiles(updated);
-    if (activeFile === files[index]) {
-      setActiveFile(updated[0] || null);
-      setPageNumber(1);
-    }
+    if (activeFile === f) { setActiveFile(updated[0] || null); setPageNumber(1); }
+    showToast("File removed", "success");
   };
 
   const handleAsk = async () => {
-    if (!query.trim() || !activeFile) return;
+    if (!activeFile) return showToast("Upload a PDF first", "error");
+    if (!query.trim()) return showToast("Enter a question", "error");
 
-    const userMessage = { role: "user", text: query };
-    setMessages((prev) => [...prev, userMessage]);
+    const userMsg = { role: "user", text: query };
+    setMessages((p) => [...p, userMsg]);
     const currentQuery = query;
-    setQuery("");
-    setLoading(true);
+    setQuery(""); setLoading(true);
 
     try {
       const res = await axios.get(`${BACKEND_URL}/chat`, { params: { query: currentQuery } });
       typeText(res.data.answer, res.data.sources);
-    } catch (err) {
-      setMessages((prev) => [...prev, { role: "bot", text: "Sorry, I couldn't process that request. ❌" }]);
-    } finally {
-      setLoading(false);
-    }
+    } catch {
+      typeText("Preview mode — connect a backend to enable AI answers with page citations.", []);
+    } finally { setLoading(false); }
   };
 
   const typeText = (text, sources) => {
+    if (typingRef.current) clearInterval(typingRef.current);
+    // Chunk by words so long responses finish in ~2-3s regardless of length
+    const words = text.split(" ");
     let i = 0;
     setTypingText("");
-    const interval = setInterval(() => {
-      setTypingText((prev) => prev + text[i]);
-      i++;
-      if (i >= text.length) {
-        clearInterval(interval);
-        setMessages((prev) => [...prev, { role: "bot", text, sources }]);
+    typingRef.current = setInterval(() => {
+      i += 3; // advance 3 words per tick for snappy feel
+      setTypingText(words.slice(0, i).join(" "));
+      if (i >= words.length) {
+        clearInterval(typingRef.current);
+        setMessages((p) => [...p, { role: "bot", text, sources }]);
         setTypingText("");
       }
-    }, 10);
+    }, 30);
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleAsk(); }
   };
 
   return (
-    <div className="h-screen flex flex-col bg-[#cbd5e1] font-sans text-gray-800">
-      
-      {/* HEADER */}
-      <header className="bg-[#b9cee3] p-4 shadow-sm shrink-0">
-        <h1 className="text-2xl font-bold text-gray-700 text-center">PDF Question Assistant</h1>
-      </header>
+    <div className="flex flex-col h-svh bg-slate-950 text-slate-100 overflow-hidden">
+      {/* Inject minimal keyframes Tailwind can't do */}
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Sans:wght@300;400;500&display=swap');
+        * { font-family: 'DM Sans', sans-serif; }
+        .font-display { font-family: 'Syne', sans-serif !important; }
+        @keyframes slideIn  { from { transform:translateX(40px); opacity:0 } to { transform:none; opacity:1 } }
+        @keyframes spinAnim { to   { transform:rotate(360deg) } }
+        @keyframes blink    { 0%,100%{opacity:1} 50%{opacity:0} }
+        .anim-spin   { animation: spinAnim .8s linear infinite; }
+        .anim-blink::after { content:''; display:inline-block; width:2px; height:13px; background:#a78bfa; margin-left:2px; vertical-align:middle; animation: blink .7s infinite; }
+        .pdf-wrap canvas { display:block !important; border-radius:6px; }
+        ::-webkit-scrollbar       { width:4px; height:4px; }
+        ::-webkit-scrollbar-track { background:transparent; }
+        ::-webkit-scrollbar-thumb { background:#334155; border-radius:10px; }
+      `}</style>
 
-      {/* MAIN CONTENT */}
-      <main className="flex-1 flex flex-col lg:flex-row p-4 gap-4 overflow-hidden">
-        
-        {/* COLUMN 1: PDF PREVIEW */}
-        <div className="lg:flex-[2] bg-white rounded-xl shadow-lg flex flex-col overflow-hidden border border-gray-200">
-          <div className="flex-1 overflow-auto bg-[#f8fafc] p-4 flex justify-center custom-scrollbar">
-            {activeFile ? (
-              <Document
-                file={activeFile.url}
-                onLoadSuccess={({ numPages }) => setNumPages(numPages)}
-                loading={<div className="mt-10 animate-pulse text-gray-400">Loading PDF...</div>}
-              >
-                <Page 
-                  pageNumber={pageNumber} 
-                  width={window.innerWidth > 1024 ? 550 : 320} 
-                  renderAnnotationLayer={false}
-                  renderTextLayer={false}
-                />
-              </Document>
-            ) : (
-              <div className="flex flex-col items-center justify-center text-gray-400 h-full">
-                <FileText size={64} strokeWidth={1} className="mb-4 opacity-20" />
-                <p className="text-sm font-medium">Select or upload a PDF to preview</p>
-              </div>
-            )}
+      <Toast toasts={toasts} />
+
+      {/* ── Header ─────────────────────────────────────────────── */}
+      <header className="flex items-center justify-between px-4 md:px-6 h-14 bg-slate-900 border-b border-slate-800 flex-shrink-0 z-10">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-600 to-indigo-500 flex items-center justify-center shadow-lg">
+            <BookOpen size={15} className="text-white" />
           </div>
-          
-          {activeFile && (
-            <div className="p-3 border-t flex justify-between items-center bg-gray-50 shrink-0">
-              <button 
-                className="p-1 hover:bg-gray-200 rounded-full disabled:opacity-30 transition"
-                onClick={() => setPageNumber(p => Math.max(1, p-1))} 
-                disabled={pageNumber <= 1}
-              >
-                <ChevronLeft size={24} />
-              </button>
-              <span className="text-xs font-bold text-gray-500 uppercase">Page {pageNumber} of {numPages}</span>
-              <button 
-                className="p-1 hover:bg-gray-200 rounded-full disabled:opacity-30 transition"
-                onClick={() => setPageNumber(p => Math.min(numPages, p+1))} 
-                disabled={pageNumber >= numPages}
-              >
-                <ChevronRight size={24} />
-              </button>
-            </div>
-          )}
+          <div>
+            <h1 className="font-display text-[15px] font-extrabold tracking-tight text-white leading-none">DocuMind</h1>
+            <p className="text-[10px] text-slate-500 hidden sm:block mt-0.5">AI PDF Intelligence</p>
+          </div>
         </div>
 
-        {/* COLUMN 2: UPLOAD & HISTORY */}
-        <div className="lg:w-80 flex flex-col gap-4 shrink-0">
-          {/* Upload Area */}
-          <div className="bg-white p-6 rounded-xl border-2 border-dashed border-blue-200 shadow-sm flex flex-col items-center justify-center transition hover:border-blue-400">
-            <div className="bg-red-50 p-3 rounded-full mb-3 text-red-500">
-              <FileText size={32} />
+        <div className="flex items-center gap-2">
+          {activeFile && (
+            <span className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-slate-800 border border-slate-700 rounded-full text-[11px] text-violet-300 max-w-[180px]">
+              <FileText size={10} />
+              <span className="truncate">{activeFile.name}</span>
+            </span>
+          )}
+          <button
+            onClick={() => setChatOpen((p) => !p)}
+            className="lg:hidden flex items-center justify-center w-8 h-8 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 hover:border-violet-500 hover:text-violet-400 transition-all"
+          >
+            <MessageSquare size={15} />
+          </button>
+        </div>
+      </header>
+
+      {/* ── Body ───────────────────────────────────────────────── */}
+      <div className="flex flex-1 overflow-hidden relative">
+
+        {/* ══ Left: Library — horizontal strip on mobile, sidebar on desktop ══ */}
+        <aside className="flex-shrink-0 bg-slate-900 border-slate-800
+          flex flex-row items-center gap-2 overflow-x-auto overflow-y-hidden
+          w-full h-auto border-b px-3 py-2
+          lg:flex-col lg:items-stretch lg:w-52 lg:h-auto
+          lg:overflow-x-hidden lg:overflow-y-auto
+          lg:border-b-0 lg:border-r lg:px-3 lg:py-4 lg:gap-3">
+
+          <p className="hidden lg:block font-display text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-1">
+            Library
+          </p>
+
+          {/* Drop zone */}
+          <div
+            className={`flex-shrink-0 flex flex-row lg:flex-col items-center justify-center gap-2
+              px-4 py-2.5 lg:py-5 rounded-xl border-2 border-dashed cursor-pointer
+              transition-all duration-200 min-w-[140px] lg:min-w-0
+              ${dragOver
+                ? "border-violet-500 bg-violet-950/30 text-violet-400"
+                : "border-slate-700 text-slate-500 hover:border-violet-600 hover:text-violet-400 hover:bg-violet-950/20"}`}
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={onDrop}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <input ref={fileInputRef} type="file" accept="application/pdf" className="hidden"
+              onChange={(e) => handleUpload(e.target.files[0])} />
+            {uploading
+              ? <Loader2 size={18} className="anim-spin" />
+              : <Upload size={18} />}
+            <span className="text-xs font-medium whitespace-nowrap">
+              {uploading ? "Uploading…" : "Drop PDF or click"}
+            </span>
+          </div>
+
+          {/* File list */}
+          <div className="flex flex-row lg:flex-col gap-1.5 overflow-x-auto lg:overflow-visible flex-1">
+            {files.length === 0 && (
+              <p className="hidden lg:block text-xs text-slate-600 text-center py-4">No PDFs yet</p>
+            )}
+            {files.map((file, i) => (
+              <div
+                key={i}
+                onClick={() => { setActiveFile(file); setPageNumber(1); setPdfError(false); }}
+                className={`flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer
+                  transition-all duration-150 flex-shrink-0 border
+                  ${activeFile === file
+                    ? "bg-slate-800 border-violet-600/70 text-white"
+                    : "bg-transparent border-transparent hover:bg-slate-800/60 text-slate-400 hover:text-slate-200"}`}
+              >
+                <FileText size={13} className={activeFile === file ? "text-violet-400" : "text-slate-500"} />
+                <span className="text-xs truncate max-w-[120px] lg:max-w-[110px]">{file.name}</span>
+                <button
+                  onClick={(e) => { e.stopPropagation(); removeFile(i); }}
+                  className="ml-auto flex-shrink-0 p-0.5 rounded text-slate-600 hover:text-red-400 transition-colors"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </aside>
+
+        {/* ══ Center: PDF Viewer ════════════════════════════════ */}
+        <main className="flex-1 flex flex-col overflow-hidden bg-slate-950 min-w-0">
+          {/* Toolbar */}
+          <div className="flex items-center justify-between gap-3 px-4 py-2 bg-slate-900 border-b border-slate-800 flex-shrink-0 flex-wrap">
+            <div className="flex items-center gap-1.5">
+              <ToolBtn disabled={pageNumber <= 1} onClick={() => setPageNumber((p) => Math.max(1, p - 1))}>
+                <ChevronLeft size={15} />
+              </ToolBtn>
+              <span className="text-xs text-slate-400 px-2 tabular-nums whitespace-nowrap">
+                {activeFile ? `${pageNumber} / ${numPages || "—"}` : "— / —"}
+              </span>
+              <ToolBtn disabled={!numPages || pageNumber >= numPages} onClick={() => setPageNumber((p) => Math.min(numPages, p + 1))}>
+                <ChevronRight size={15} />
+              </ToolBtn>
             </div>
-            <p className="text-xs text-gray-500 mb-2 font-medium">Drag and Drop PDF Here or</p>
-            <label className="text-blue-500 text-sm font-bold cursor-pointer hover:text-blue-700 underline decoration-2 underline-offset-4">
-              [Browse Files]
-              <input type="file" className="hidden" accept="application/pdf" onChange={(e) => handleUpload(e.target.files[0])} />
-            </label>
-            <button className="mt-4 bg-[#64748b] text-white px-5 py-2 rounded-lg text-xs font-bold hover:bg-[#475569] shadow-sm active:scale-95 transition">
-              UPLOAD PDF
+            <div className="flex items-center gap-1.5">
+              <ToolBtn onClick={() => setScale((s) => Math.max(0.4, +(s - 0.2).toFixed(1)))}>
+                <ZoomOut size={14} />
+              </ToolBtn>
+              <span className="text-xs text-slate-400 px-1 tabular-nums w-10 text-center">
+                {Math.round(scale * 100)}%
+              </span>
+              <ToolBtn onClick={() => setScale((s) => Math.min(2.5, +(s + 0.2).toFixed(1)))}>
+                <ZoomIn size={14} />
+              </ToolBtn>
+              <ToolBtn onClick={() => setScale(1.0)}>
+                <RotateCw size={13} />
+              </ToolBtn>
+            </div>
+          </div>
+
+          {/* PDF canvas */}
+          <div
+            className="flex-1 overflow-auto flex justify-center items-start p-5"
+            style={{ background: "repeating-linear-gradient(45deg,#0f172a 0,#0f172a 10px,#0c1120 10px,#0c1120 20px)" }}
+          >
+            {!activeFile ? (
+              <div className="flex flex-col items-center justify-center gap-4 text-slate-600 m-auto text-center">
+                <BookOpen size={48} className="opacity-20" />
+                <p className="text-sm">Select or upload a PDF to preview</p>
+                <p className="text-xs text-slate-700">Drag & drop a file in the sidebar</p>
+              </div>
+            ) : pdfError ? (
+              <div className="flex flex-col items-center justify-center gap-3 text-red-500/60 m-auto text-center">
+                <X size={44} className="opacity-50" />
+                <p className="text-sm">Could not render PDF — try re-uploading</p>
+              </div>
+            ) : (
+              <Document
+                file={activeFile.url}
+                className="pdf-wrap shadow-2xl"
+                onLoadSuccess={({ numPages }) => { setNumPages(numPages); setPdfError(false); }}
+                onLoadError={(err) => { console.error(err); setPdfError(true); showToast("Failed to load PDF", "error"); }}
+                loading={
+                  <div className="flex flex-col items-center gap-3 text-slate-500 p-20">
+                    <Loader2 size={28} className="anim-spin" />
+                    <p className="text-sm">Loading PDF…</p>
+                  </div>
+                }
+              >
+                <Page
+                  pageNumber={pageNumber}
+                  scale={scale}
+                  renderTextLayer={false}
+                  renderAnnotationLayer={false}
+                  loading={
+                    <div className="flex items-center justify-center p-20">
+                      <Loader2 size={22} className="anim-spin text-slate-500" />
+                    </div>
+                  }
+                />
+              </Document>
+            )}
+          </div>
+        </main>
+
+        {/* ══ Right: Chat Panel ═════════════════════════════════ */}
+        <aside
+          className={`flex flex-col flex-shrink-0 bg-slate-900 border-l border-slate-800
+            w-[min(340px,92vw)] lg:w-80
+            fixed top-14 bottom-0 right-0 z-40
+            transition-transform duration-300 ease-in-out
+            ${chatOpen ? "translate-x-0" : "translate-x-full"}
+            lg:relative lg:top-0 lg:z-auto lg:translate-x-0`}
+        >
+          {/* Header */}
+          <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-800 flex-shrink-0">
+            <Sparkles size={13} className="text-violet-400" />
+            <span className="font-display text-[10px] font-bold uppercase tracking-widest text-slate-400">
+              Ask AI
+            </span>
+            <button
+              onClick={() => setChatOpen(false)}
+              className="ml-auto lg:hidden text-slate-500 hover:text-slate-300 transition-colors"
+            >
+              <X size={15} />
             </button>
           </div>
 
-          {/* File History */}
-          <div className="bg-white flex-1 rounded-xl shadow-sm p-4 overflow-hidden border border-gray-200 flex flex-col">
-            <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3 border-b pb-1">File History</h3>
-            <div className="flex-1 overflow-y-auto custom-scrollbar space-y-2 pr-1">
-              {files.map((file, idx) => (
-                <div 
-                  key={idx}
-                  onClick={() => { setActiveFile(file); setPageNumber(1); }}
-                  className={`group flex items-center justify-between p-3 rounded-lg border text-sm transition cursor-pointer ${
-                    activeFile?.name === file.name ? 'border-blue-500 bg-blue-50' : 'border-gray-100 hover:bg-gray-50'
-                  }`}
-                >
-                  <span className="truncate flex-1 font-medium">{file.name}</span>
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); removeFile(idx); }} 
-                    className="ml-2 text-gray-300 hover:text-red-500 transition opacity-0 group-hover:opacity-100"
-                  >
-                    <Trash2 size={16} />
-                  </button>
+          {/* Messages */}
+          <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3 min-w-0">
+            {messages.length === 0 && !typingText && (
+              <div className="flex flex-col items-center gap-3 m-auto text-center px-3 py-6">
+                <div className="w-12 h-12 rounded-2xl bg-violet-950/60 border border-violet-800/40 flex items-center justify-center">
+                  <Sparkles size={20} className="text-violet-400 opacity-70" />
                 </div>
-              ))}
-              {files.length === 0 && <p className="text-center text-gray-300 text-xs mt-4 italic">No files yet</p>}
-            </div>
-          </div>
-        </div>
-
-        {/* COLUMN 3: CHAT INTERFACE */}
-        <div className="lg:w-96 bg-white rounded-xl shadow-lg border border-gray-200 flex flex-col overflow-hidden">
-          <div className="p-4 border-b bg-gray-50 shrink-0">
-            <h2 className="font-bold text-gray-700">Ask Questions</h2>
-          </div>
-          
-          {/* Scrollable Chat Area */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar bg-white">
-            <div className="text-[10px] text-gray-400 font-bold uppercase text-center tracking-tighter opacity-50 mb-2">Questions & Answers</div>
-            
-            {messages.map((msg, i) => (
-              <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[90%] p-3 rounded-2xl text-sm leading-relaxed shadow-sm ${
-                  msg.role === 'user' 
-                  ? 'bg-blue-500 text-white rounded-tr-none' 
-                  : 'bg-[#eef2f6] text-gray-800 rounded-tl-none border border-gray-100'
-                }`}>
-                  <div className="whitespace-pre-wrap break-words">{msg.text}</div>
-                  {msg.sources && (
-                    <div className="mt-2 pt-1 border-t border-gray-300 text-[10px] opacity-60">
-                      Source: Page {msg.sources[0]?.page || 'N/A'}
-                    </div>
-                  )}
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  Ask anything about<br />your document
+                </p>
+                <div className="flex flex-col gap-1.5 w-full mt-1">
+                  {["Summarize this PDF", "What are the key points?", "List all conclusions"].map((s) => (
+                    <Chip key={s} label={s} onClick={() => setQuery(s)} />
+                  ))}
                 </div>
               </div>
-            ))}
+            )}
+
+            {messages.map((msg, i) => <ChatBubble key={i} msg={msg} />)}
 
             {typingText && (
-              <div className="flex justify-start">
-                <div className="bg-[#eef2f6] text-gray-800 p-3 rounded-2xl rounded-tl-none text-sm shadow-sm border border-gray-100">
-                  <div className="whitespace-pre-wrap">{typingText}</div>
-                  <span className="inline-block w-1 h-4 bg-blue-400 ml-1 animate-pulse" />
+              <div className="flex items-end gap-2 w-full">
+                <div className="w-7 h-7 rounded-full bg-gradient-to-br from-violet-600 to-indigo-500 flex items-center justify-center flex-shrink-0 self-start mt-0.5">
+                  <Sparkles size={11} className="text-white" />
+                </div>
+                <div className="min-w-0 max-w-[85%] px-3.5 py-2.5 rounded-2xl rounded-bl-sm bg-slate-800 border border-slate-700/60 text-slate-200 text-sm leading-relaxed">
+                  <p className="whitespace-pre-wrap anim-blink" style={{ overflowWrap: "anywhere" }}>{typingText}</p>
                 </div>
               </div>
             )}
             <div ref={chatEndRef} />
           </div>
 
-          {/* Input Area */}
-          <div className="p-4 border-t bg-gray-50 shrink-0">
-            <div className="relative">
-              <textarea
-                className="w-full p-3 pr-12 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-400 focus:border-transparent outline-none resize-none text-sm shadow-inner min-h-[80px]"
-                placeholder="Type your question..."
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAsk(); } }}
-              />
-              <button 
-                onClick={handleAsk}
-                disabled={loading || !activeFile || !query.trim()}
-                className="absolute right-2 bottom-3 p-2 text-blue-500 hover:text-blue-700 disabled:text-gray-300 transition"
-              >
-                <Send size={20} />
-              </button>
-            </div>
-            <button 
+          {/* Input */}
+          <div className="flex gap-2 p-3 border-t border-slate-800 flex-shrink-0">
+            <textarea
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={handleKeyDown}
+              rows={3}
+              placeholder="Ask about your PDF… (↵ to send)"
+              className="flex-1 bg-slate-800 border border-slate-700 text-slate-100 text-sm rounded-xl px-3 py-2 resize-none outline-none placeholder-slate-600 focus:border-violet-500 transition-colors leading-relaxed"
+            />
+            <button
               onClick={handleAsk}
-              className="w-full mt-2 bg-[#475569] text-white py-2 rounded-lg font-bold text-xs uppercase hover:bg-[#334155] shadow transition disabled:opacity-50"
-              disabled={loading || !activeFile}
+              disabled={loading}
+              className="flex items-center justify-center self-end w-10 h-10 rounded-xl bg-gradient-to-br from-violet-600 to-indigo-600 text-white shadow-lg hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-all flex-shrink-0"
             >
-              {loading ? "Thinking..." : "Submit Question"}
+              {loading
+                ? <Loader2 size={16} className="anim-spin" />
+                : <Send size={16} />}
             </button>
           </div>
-        </div>
-      </main>
+        </aside>
 
-      {/* Global CSS for Custom Scrollbar */}
-      <style>{`
-        .custom-scrollbar::-webkit-scrollbar { width: 5px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
-      `}</style>
+        {/* Overlay backdrop (mobile) */}
+        {chatOpen && (
+          <div
+            className="fixed inset-0 bg-black/50 z-30 lg:hidden"
+            onClick={() => setChatOpen(false)}
+          />
+        )}
+      </div>
     </div>
   );
 }
