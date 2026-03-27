@@ -12,7 +12,7 @@ from rag import load_and_split_pdf, create_vector_store, ask_question
 
 load_dotenv()
 
-# ✅ Logging setup (VERY IMPORTANT)
+# ✅ Logging setup
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
@@ -25,8 +25,8 @@ BASE_URL = os.getenv("BASE_URL")
 
 app = FastAPI(title="PDF RAG Backend")
 
-# ✅ Ensure uploads folder exists
-UPLOAD_DIR = os.path.join(os.getcwd(), "uploads")
+# ✅ Upload folder
+UPLOAD_DIR = os.path.abspath("uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 logger.info(f"Upload directory: {UPLOAD_DIR}")
@@ -37,6 +37,8 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
         "https://pdf-reader-gilt.vercel.app"
     ],
     allow_methods=["*"],
@@ -52,7 +54,7 @@ def home():
 VECTOR_DB = None
 
 
-# 🚀 UPLOAD API WITH FULL DEBUG
+# 🚀 UPLOAD API
 @app.post("/upload")
 async def upload_pdf(request: Request, file: UploadFile = File(...)):
     logger.info("📥 Upload request received")
@@ -64,6 +66,16 @@ async def upload_pdf(request: Request, file: UploadFile = File(...)):
         if not file.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Only PDF files are allowed.")
 
+        # ✅ Read file ONLY ONCE
+        file_bytes = await file.read()
+
+        if not file_bytes:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+        # ✅ File size check
+        if len(file_bytes) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+
         # ✅ Unique filename
         unique_filename = f"{uuid.uuid4()}_{file.filename}"
         file_path = os.path.join(UPLOAD_DIR, unique_filename)
@@ -71,11 +83,6 @@ async def upload_pdf(request: Request, file: UploadFile = File(...)):
         logger.info(f"Saving file: {file_path}")
 
         # ✅ Save file
-        file_bytes = await file.read()
-
-        if not file_bytes:
-            raise HTTPException(status_code=400, detail="Uploaded file is empty")
-
         with open(file_path, "wb") as f:
             f.write(file_bytes)
 
@@ -106,6 +113,7 @@ async def upload_pdf(request: Request, file: UploadFile = File(...)):
             file_url = f"{BASE_URL}/uploads/{unique_filename}"
         else:
             file_url = str(request.base_url) + f"uploads/{unique_filename}"
+            file_url = file_url.replace("http://", "https://")
 
         logger.info(f"File URL: {file_url}")
 
@@ -123,7 +131,7 @@ async def upload_pdf(request: Request, file: UploadFile = File(...)):
     except Exception as e:
         logger.error("❌ ERROR IN /upload")
         logger.error(str(e))
-        logger.error(traceback.format_exc())  # 🔥 FULL TRACE
+        logger.error(traceback.format_exc())
 
         raise HTTPException(
             status_code=500,
@@ -131,7 +139,7 @@ async def upload_pdf(request: Request, file: UploadFile = File(...)):
         )
 
 
-# 🚀 CHAT API WITH DEBUG
+# 🚀 CHAT API
 @app.get("/chat")
 def chat(query: str):
     logger.info(f"💬 Chat request: {query}")

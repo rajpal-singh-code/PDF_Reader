@@ -1,3 +1,4 @@
+models/
+uploads/
 .env
 __pycache__/
-uploads/

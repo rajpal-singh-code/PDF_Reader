@@ -4,9 +4,9 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from groq import Groq
 import os
-from dotenv import load_dotenv   
-load_dotenv()                   
+from dotenv import load_dotenv
 
+load_dotenv()
 
 def load_and_split_pdf(file_path):
     loader = PyPDFLoader(file_path)
@@ -21,7 +21,13 @@ def load_and_split_pdf(file_path):
 
 
 def create_vector_store(chunks):
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    os.makedirs("models", exist_ok=True)
+
+    embeddings = HuggingFaceEmbeddings(
+        model_name="all-MiniLM-L6-v2",
+        cache_folder=os.path.abspath("models")
+    )
+
     vector_store = FAISS.from_documents(chunks, embeddings)
     return vector_store
 
@@ -32,7 +38,7 @@ def ask_question(vectorstore, query):
 
     context = "\n\n".join([doc.page_content[:400] for doc in docs])
 
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))  
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
     prompt = f"""
         Answer based on the context below.
@@ -43,10 +49,10 @@ def ask_question(vectorstore, query):
 
         Question: {query}
     """
-
+    
     try:
         response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",  
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "user", "content": prompt}
             ]

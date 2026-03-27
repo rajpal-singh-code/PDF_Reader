@@ -5,11 +5,13 @@ langchain==0.2.1
 langchain-community==0.2.1
 langchain-huggingface==0.0.3
 
-faiss-cpu==1.13.2
+faiss-cpu
 
-sentence-transformers==2.7.0
-transformers==4.41.1
-torch==2.2.2
+sentence-transformers
+transformers
+
+# 🔥 REMOVE STRICT TORCH VERSION
+torch
 
 python-dotenv==1.0.1
 pypdf==4.2.0
